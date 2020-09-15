@@ -37,6 +37,12 @@ ifdef VT_EXTRA_BUILD_FLAGS
 export EXTRA_BUILD_FLAGS := $(VT_EXTRA_BUILD_FLAGS)
 endif
 
+# We now have CGO code in the build which throws warnings with newer gcc builds.
+# See: https://github.com/mattn/go-sqlite3/issues/803
+# Work around by dropping optimization level from default -O2.
+# Safe, since this code isn't performance critical.
+export CGO_CFLAGS := -O1
+
 embed_config:
 	cd go/vt/mysqlctl
 	go run github.com/GeertJohan/go.rice/rice embed-go
@@ -155,14 +161,13 @@ ifndef NOBANNER
 	echo $$(date): Compiling proto definitions
 endif
 
-# TODO(sougou): find a better way around this temp hack.
-VTTOP=$(VTROOT)/../../..
 $(PROTO_GO_OUTS): install_protoc-gen-go proto/*.proto
 	for name in $(PROTO_SRC_NAMES); do \
-		cd $(VTTOP)/src && \
-		$(VTROOT)/bin/protoc --go_out=plugins=grpc:. -Ivitess.io/vitess/proto vitess.io/vitess/proto/$${name}.proto && \
-		goimports -w $(VTROOT)/go/vt/proto/$${name}/$${name}.pb.go; \
+		$(VTROOT)/bin/protoc --go_out=plugins=grpc:. -Iproto proto/$${name}.proto && \
+		goimports -w vitess.io/vitess/go/vt/proto/$${name}/$${name}.pb.go; \
 	done
+	cp -Rf vitess.io/vitess/go/vt/proto/* go/vt/proto
+	rm -rf vitess.io/vitess/go/vt/proto/
 
 # Helper targets for building Docker images.
 # Please read docker/README.md to understand the different available images.

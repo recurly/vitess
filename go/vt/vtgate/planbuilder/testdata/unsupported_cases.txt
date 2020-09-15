@@ -2,14 +2,6 @@
 "select * from user union select * from user_extra"
 "unsupported: UNION cannot be executed as a single route"
 
-# SET
-"set a=1"
-"plan building not supported"
-
-# set user defined and system variable
-"set @foo = 42, @bar = @foo, @@xyz = 28800"
-"plan building not supported"
-
 # SHOW
 "show create database"
 "plan building not supported"
@@ -431,3 +423,7 @@
 # insert using select get_lock from table
 "insert into user(pattern) SELECT GET_LOCK('xyz1', 10)"
 "unsupported: insert into select"
+
+# union with SQL_CALC_FOUND_ROWS 
+"(select sql_calc_found_rows id from user where id = 1 limit 1) union select id from user where id = 1"
+"SQL_CALC_FOUND_ROWS not supported with union"

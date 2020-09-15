@@ -20,9 +20,13 @@ import (
 	"errors"
 	"fmt"
 
+	"vitess.io/vitess/go/mysql"
+
+	"vitess.io/vitess/go/sqltypes"
+
 	"vitess.io/vitess/go/vt/key"
 
-	"vitess.io/vitess/go/vt/proto/vtrpc"
+	vtrpcpb "vitess.io/vitess/go/vt/proto/vtrpc"
 	"vitess.io/vitess/go/vt/vterrors"
 
 	"vitess.io/vitess/go/vt/vtgate/evalengine"
@@ -31,26 +35,27 @@ import (
 	"vitess.io/vitess/go/vt/vtgate/engine"
 )
 
-// buildSelectPlan is the new function to build a Select plan.
-func buildSelectPlan(stmt sqlparser.Statement, vschema ContextVSchema) (engine.Primitive, error) {
-	sel := stmt.(*sqlparser.Select)
+func buildSelectPlan(query string) func(sqlparser.Statement, ContextVSchema) (engine.Primitive, error) {
+	return func(stmt sqlparser.Statement, vschema ContextVSchema) (engine.Primitive, error) {
+		sel := stmt.(*sqlparser.Select)
 
-	p, err := handleDualSelects(sel, vschema)
-	if err != nil {
-		return nil, err
-	}
-	if p != nil {
-		return p, nil
-	}
+		p, err := handleDualSelects(sel, vschema)
+		if err != nil {
+			return nil, err
+		}
+		if p != nil {
+			return p, nil
+		}
 
-	pb := newPrimitiveBuilder(vschema, newJointab(sqlparser.GetBindvars(sel)))
-	if err := pb.processSelect(sel, nil); err != nil {
-		return nil, err
+		pb := newPrimitiveBuilder(vschema, newJointab(sqlparser.GetBindvars(sel)))
+		if err := pb.processSelect(sel, nil, query); err != nil {
+			return nil, err
+		}
+		if err := pb.bldr.Wireup(pb.bldr, pb.jt); err != nil {
+			return nil, err
+		}
+		return pb.bldr.Primitive(), nil
 	}
-	if err := pb.bldr.Wireup(pb.bldr, pb.jt); err != nil {
-		return nil, err
-	}
-	return pb.bldr.Primitive(), nil
 }
 
 // processSelect builds a primitive tree for the given query or subquery.
@@ -88,15 +93,26 @@ func buildSelectPlan(stmt sqlparser.Statement, vschema ContextVSchema) (engine.P
 // The LIMIT clause is the last construct of a query. If it cannot be
 // pushed into a route, then a primitive is created on top of any
 // of the above trees to make it discard unwanted rows.
-func (pb *primitiveBuilder) processSelect(sel *sqlparser.Select, outer *symtab) error {
+func (pb *primitiveBuilder) processSelect(sel *sqlparser.Select, outer *symtab, query string) error {
 	// Check and error if there is any locking function present in select expression.
 	for _, expr := range sel.SelectExprs {
 		if aExpr, ok := expr.(*sqlparser.AliasedExpr); ok && sqlparser.IsLockingFunc(aExpr.Expr) {
-			return vterrors.Errorf(vtrpc.Code_FAILED_PRECONDITION, "%v allowed only with dual", sqlparser.String(aExpr))
+			return vterrors.Errorf(vtrpcpb.Code_FAILED_PRECONDITION, "%v allowed only with dual", sqlparser.String(aExpr))
 		}
 	}
-	if sel.SQLCalcFoundRows && sel.Limit != nil {
-		return vterrors.Errorf(vtrpc.Code_UNIMPLEMENTED, "sql_calc_found_rows not yet fully supported")
+	if sel.SQLCalcFoundRows {
+		if outer != nil || query == "" {
+			return mysql.NewSQLError(mysql.ERCantUseOptionHere, "42000", "Incorrect usage/placement of 'SQL_CALC_FOUND_ROWS'")
+		}
+		sel.SQLCalcFoundRows = false
+		if sel.Limit != nil {
+			builder, err := buildSQLCalcFoundRowsPlan(query, sel, outer, pb.vschema)
+			if err != nil {
+				return err
+			}
+			pb.bldr = builder
+			return nil
+		}
 	}
 
 	if err := pb.processTableExprs(sel.From); err != nil {
@@ -105,16 +121,14 @@ func (pb *primitiveBuilder) processSelect(sel *sqlparser.Select, outer *symtab) 
 
 	if rb, ok := pb.bldr.(*route); ok {
 		// TODO(sougou): this can probably be improved.
-		for _, ro := range rb.routeOptions {
-			directives := sqlparser.ExtractCommentDirectives(sel.Comments)
-			ro.eroute.QueryTimeout = queryTimeout(directives)
-			if ro.eroute.TargetDestination != nil {
-				return errors.New("unsupported: SELECT with a target destination")
-			}
+		directives := sqlparser.ExtractCommentDirectives(sel.Comments)
+		rb.eroute.QueryTimeout = queryTimeout(directives)
+		if rb.eroute.TargetDestination != nil {
+			return errors.New("unsupported: SELECT with a target destination")
+		}
 
-			if directives.IsSet(sqlparser.DirectiveScatterErrorsAsWarnings) {
-				ro.eroute.ScatterErrorsAsWarnings = true
-			}
+		if directives.IsSet(sqlparser.DirectiveScatterErrorsAsWarnings) {
+			rb.eroute.ScatterErrorsAsWarnings = true
 		}
 	}
 
@@ -147,8 +161,61 @@ func (pb *primitiveBuilder) processSelect(sel *sqlparser.Select, outer *symtab) 
 	return nil
 }
 
+func buildSQLCalcFoundRowsPlan(query string, sel *sqlparser.Select, outer *symtab, vschema ContextVSchema) (builder, error) {
+	ljt := newJointab(sqlparser.GetBindvars(sel))
+	frpb := newPrimitiveBuilder(vschema, ljt)
+	err := frpb.processSelect(sel, outer, "")
+	if err != nil {
+		return nil, err
+	}
+
+	statement, err := sqlparser.Parse(query)
+	if err != nil {
+		return nil, err
+	}
+	sel2 := statement.(*sqlparser.Select)
+
+	sel2.SQLCalcFoundRows = false
+	sel2.OrderBy = nil
+	sel2.Limit = nil
+
+	countStartExpr := []sqlparser.SelectExpr{&sqlparser.AliasedExpr{
+		Expr: &sqlparser.FuncExpr{
+			Name:  sqlparser.NewColIdent("count"),
+			Exprs: []sqlparser.SelectExpr{&sqlparser.StarExpr{}},
+		},
+	}}
+	if sel2.GroupBy == nil && sel2.Having == nil {
+		// if there is no grouping, we can use the same query and
+		// just replace the SELECT sub-clause to have a single count(*)
+		sel2.SelectExprs = countStartExpr
+	} else {
+		// when there is grouping, we have to move the original query into a derived table.
+		//                       select id, sum(12) from user group by id =>
+		// select count(*) from (select id, sum(12) from user group by id) t
+		sel3 := &sqlparser.Select{
+			SelectExprs: countStartExpr,
+			From: []sqlparser.TableExpr{
+				&sqlparser.AliasedTableExpr{
+					Expr: &sqlparser.Subquery{Select: sel2},
+					As:   sqlparser.NewTableIdent("t"),
+				},
+			},
+		}
+		sel2 = sel3
+	}
+
+	cjt := newJointab(sqlparser.GetBindvars(sel2))
+	countpb := newPrimitiveBuilder(vschema, cjt)
+	err = countpb.processSelect(sel2, outer, "")
+	if err != nil {
+		return nil, err
+	}
+	return &sqlCalcFoundRows{LimitQuery: frpb.bldr, CountQuery: countpb.bldr, ljt: ljt, cjt: cjt}, nil
+}
+
 func handleDualSelects(sel *sqlparser.Select, vschema ContextVSchema) (engine.Primitive, error) {
-	if !isOnlyDual(sel.From) {
+	if !isOnlyDual(sel) {
 		return nil, nil
 	}
 
@@ -193,11 +260,16 @@ func buildLockingPrimitive(sel *sqlparser.Select, vschema ContextVSchema) (engin
 	}, nil
 }
 
-func isOnlyDual(from sqlparser.TableExprs) bool {
-	if len(from) > 1 {
+func isOnlyDual(sel *sqlparser.Select) bool {
+	if sel.Where != nil || sel.GroupBy != nil || sel.Having != nil || sel.Limit != nil || sel.OrderBy != nil {
+		// we can only deal with queries without any other subclauses - just SELECT and FROM, nothing else is allowed
 		return false
 	}
-	table, ok := from[0].(*sqlparser.AliasedTableExpr)
+
+	if len(sel.From) > 1 {
+		return false
+	}
+	table, ok := sel.From[0].(*sqlparser.AliasedTableExpr)
 	if !ok {
 		return false
 	}
@@ -217,6 +289,18 @@ func (pb *primitiveBuilder) pushFilter(in sqlparser.Expr, whereType string) erro
 		if err != nil {
 			return err
 		}
+		rut, isRoute := origin.(*route)
+		if isRoute && rut.eroute.Opcode == engine.SelectDBA {
+			r := &rewriter{}
+			sqlparser.Rewrite(expr, r.rewriteTableSchema, nil)
+			if r.err == sqlparser.ErrExprNotSupported {
+				return vterrors.Errorf(vtrpcpb.Code_UNIMPLEMENTED, "comparison with `table_schema` column not supported")
+			}
+			if r.err != nil {
+				return r.err
+			}
+			rut.eroute.SysTableKeyspaceExpr = append(rut.eroute.SysTableKeyspaceExpr, r.tableNameExpressions...)
+		}
 		// The returned expression may be complex. Resplit before pushing.
 		for _, subexpr := range splitAndExpression(nil, expr) {
 			if err := pb.bldr.PushFilter(pb, subexpr, whereType, origin); err != nil {
@@ -226,6 +310,42 @@ func (pb *primitiveBuilder) pushFilter(in sqlparser.Expr, whereType string) erro
 		pb.addPullouts(pullouts)
 	}
 	return nil
+}
+
+type rewriter struct {
+	tableNameExpressions []evalengine.Expr
+	err                  error
+}
+
+func (r *rewriter) rewriteTableSchema(cursor *sqlparser.Cursor) bool {
+	switch node := cursor.Node().(type) {
+	case *sqlparser.ColName:
+		if node.Name.EqualString("table_schema") {
+			switch parent := cursor.Parent().(type) {
+			case *sqlparser.ComparisonExpr:
+				if parent.Operator == sqlparser.EqualStr && shouldRewrite(parent.Right) {
+
+					evalExpr, err := sqlparser.Convert(parent.Right)
+					if err != nil {
+						r.err = err
+						return false
+					}
+					r.tableNameExpressions = append(r.tableNameExpressions, evalExpr)
+					parent.Right = sqlparser.NewArgument([]byte(":" + sqltypes.BvSchemaName))
+				}
+			}
+		}
+	}
+	return true
+}
+
+func shouldRewrite(e sqlparser.Expr) bool {
+	switch node := e.(type) {
+	case *sqlparser.FuncExpr:
+		// we should not rewrite database() calls against information_schema
+		return !(node.Name.EqualString("database") || node.Name.EqualString("schema"))
+	}
+	return true
 }
 
 // reorderBySubquery reorders the filters by pushing subqueries
@@ -314,12 +434,10 @@ func (pb *primitiveBuilder) pushSelectRoutes(selectExprs sqlparser.SelectExprs) 
 				// This code is unreachable because the parser doesn't allow joins for next val statements.
 				return nil, errors.New("unsupported: SELECT NEXT query in cross-shard query")
 			}
-			for _, ro := range rb.routeOptions {
-				if ro.eroute.Opcode != engine.SelectNext {
-					return nil, errors.New("NEXT used on a non-sequence table")
-				}
-				ro.eroute.Opcode = engine.SelectNext
+			if rb.eroute.Opcode != engine.SelectNext {
+				return nil, errors.New("NEXT used on a non-sequence table")
 			}
+			rb.eroute.Opcode = engine.SelectNext
 			resultColumns = append(resultColumns, rb.PushAnonymous(node))
 		default:
 			return nil, fmt.Errorf("BUG: unexpected select expression type: %T", node)

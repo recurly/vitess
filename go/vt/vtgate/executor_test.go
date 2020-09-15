@@ -809,8 +809,9 @@ func TestExecutorShow(t *testing.T) {
 			buildVarCharRow("TestExecutor", "music_user_map", "lookup_hash_unique", "from=music_id; table=music_user_map; to=user_id", "music"),
 			buildVarCharRow("TestExecutor", "name_lastname_keyspace_id_map", "lookup", "from=name,lastname; table=name_lastname_keyspace_id_map; to=keyspace_id", "user2"),
 			buildVarCharRow("TestExecutor", "name_user_map", "lookup_hash", "from=name; table=name_user_map; to=user_id", "user"),
+			buildVarCharRow("TestExecutor", "t1_lkp_vdx", "consistent_lookup_unique", "from=unq_col; table=t1_lkp_idx; to=keyspace_id", "t1"),
 		},
-		RowsAffected: 10,
+		RowsAffected: 11,
 	}
 	if !reflect.DeepEqual(qr, wantqr) {
 		t.Errorf("show vschema vindexes:\n%+v, want\n%+v", qr, wantqr)
@@ -1216,10 +1217,11 @@ func TestExecutorDDL(t *testing.T) {
 			sbc1.ExecCount.Set(0)
 			sbc2.ExecCount.Set(0)
 			sbclookup.ExecCount.Set(0)
-
+			stmtType := "DDL"
 			_, err := executor.Execute(ctx, "TestExecute", NewSafeSession(&vtgatepb.Session{TargetString: tc.targetStr}), stmt, nil)
 			if tc.hasNoKeyspaceErr {
 				require.EqualError(t, err, "keyspace not specified", "expect query to fail")
+				stmtType = "" // For error case, plan is not generated to query log will not contain any stmtType.
 			} else {
 				require.NoError(t, err)
 			}
@@ -1233,7 +1235,7 @@ func TestExecutorDDL(t *testing.T) {
 				t.Errorf("stmt: %s\ntc: %+v\n-want,+got:\n%s", stmt, tc, diff)
 			}
 
-			testQueryLog(t, logChan, "TestExecute", "DDL", stmt, tc.shardQueryCnt)
+			testQueryLog(t, logChan, "TestExecute", stmtType, stmt, tc.shardQueryCnt)
 		}
 	}
 }

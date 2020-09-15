@@ -56,6 +56,7 @@ const (
 	StmtSavepoint
 	StmtSRollback
 	StmtRelease
+	StmtVStream
 )
 
 //ASTToStatementType returns a StatementType from an AST stmt
@@ -138,6 +139,8 @@ func Preview(sql string) StatementType {
 		return StmtSelect
 	case "stream":
 		return StmtStream
+	case "vstream":
+		return StmtVStream
 	case "insert":
 		return StmtInsert
 	case "replace":
@@ -192,6 +195,8 @@ func (s StatementType) String() string {
 		return "SELECT"
 	case StmtStream:
 		return "STREAM"
+	case StmtVStream:
+		return "VSTREAM"
 	case StmtInsert:
 		return "INSERT"
 	case StmtReplace:
@@ -319,9 +324,11 @@ func IsColName(node Expr) bool {
 // NULL is not considered to be a value.
 func IsValue(node Expr) bool {
 	switch v := node.(type) {
-	case *SQLVal:
+	case Argument:
+		return true
+	case *Literal:
 		switch v.Type {
-		case StrVal, HexVal, IntVal, ValArg:
+		case StrVal, HexVal, IntVal:
 			return true
 		}
 	}
@@ -358,10 +365,10 @@ func IsSimpleTuple(node Expr) bool {
 // NewPlanValue builds a sqltypes.PlanValue from an Expr.
 func NewPlanValue(node Expr) (sqltypes.PlanValue, error) {
 	switch node := node.(type) {
-	case *SQLVal:
+	case Argument:
+		return sqltypes.PlanValue{Key: string(node[1:])}, nil
+	case *Literal:
 		switch node.Type {
-		case ValArg:
-			return sqltypes.PlanValue{Key: string(node.Val[1:])}, nil
 		case IntVal:
 			n, err := sqltypes.NewIntegral(string(node.Val))
 			if err != nil {

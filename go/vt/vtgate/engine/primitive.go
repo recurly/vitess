@@ -86,6 +86,10 @@ type (
 		Session() SessionActions
 
 		ExecuteLock(rs *srvtopo.ResolvedShard, query *querypb.BoundQuery) (*sqltypes.Result, error)
+
+		InTransactionAndIsDML() bool
+
+		LookupRowLockShardSession() vtgatepb.CommitOrder
 	}
 
 	//SessionActions gives primitives ability to interact with the session state
@@ -107,6 +111,14 @@ type (
 
 		// ShardSession returns shard info about open connections
 		ShardSession() []*srvtopo.ResolvedShard
+
+		SetAutocommit(bool) error
+		SetClientFoundRows(bool)
+		SetSkipQueryPlanCache(bool)
+		SetSQLSelectLimit(int64)
+		SetTransactionMode(vtgatepb.TransactionMode)
+		SetWorkload(querypb.ExecuteOptions_Workload)
+		SetFoundRows(uint64)
 	}
 
 	// Plan represents the execution strategy for a given query.

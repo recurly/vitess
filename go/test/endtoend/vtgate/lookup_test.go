@@ -161,7 +161,187 @@ func TestConsistentLookup(t *testing.T) {
 	if got, want := fmt.Sprintf("%v", qr.Rows), "[[INT64(5) VARBINARY(\"\\x16k@\\xb4J\\xbaK\\xd6\")]]"; got != want {
 		t.Errorf("select:\n%v want\n%v", got, want)
 	}
-	exec(t, conn, "delete from t1 where id1=1")
+	exec(t, conn, "delete from t1 where id2=5")
+}
+
+func TestDMLScatter(t *testing.T) {
+	ctx := context.Background()
+	conn, err := mysql.Connect(ctx, &vtParams)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	/* Simple insert. after this dml, the tables will contain the following:
+	t3 (id5, id6, id7):
+	1 2 3
+	2 2 3
+	3 4 3
+	4 5 4
+
+	t3_id7_idx (id7, keyspace_id:id6):
+	3 2
+	3 2
+	3 4
+	4 5
+	*/
+	exec(t, conn, "begin")
+	exec(t, conn, "insert into t3(id5, id6, id7) values(1, 2, 3), (2, 2, 3), (3, 4, 3), (4, 5, 4)")
+	exec(t, conn, "commit")
+	qr := exec(t, conn, "select id5, id6, id7 from t3 order by id5")
+	if got, want := fmt.Sprintf("%v", qr.Rows), "[[INT64(1) INT64(2) INT64(3)] [INT64(2) INT64(2) INT64(3)] [INT64(3) INT64(4) INT64(3)] [INT64(4) INT64(5) INT64(4)]]"; got != want {
+		t.Errorf("select:\n%v want\n%v", got, want)
+	}
+
+	/* Updating a non lookup column. after this dml, the tables will contain the following:
+	t3 (id5, id6, id7):
+	42 2 3
+	2 2 3
+	3 4 3
+	4 5 4
+
+	t3_id7_idx (id7, keyspace_id:id6):
+	3 2
+	3 2
+	3 4
+	4 5
+	*/
+	exec(t, conn, "update `ks[-]`.t3 set id5 = 42 where id5 = 1")
+	qr = exec(t, conn, "select id5, id6, id7 from t3 order by id5")
+	if got, want := fmt.Sprintf("%v", qr.Rows), "[[INT64(2) INT64(2) INT64(3)] [INT64(3) INT64(4) INT64(3)] [INT64(4) INT64(5) INT64(4)] [INT64(42) INT64(2) INT64(3)]]"; got != want {
+		t.Errorf("select:\n%v want\n%v", got, want)
+	}
+
+	/* Updating a lookup column. after this dml, the tables will contain the following:
+	t3 (id5, id6, id7):
+	42 2 42
+	2 2 42
+	3 4 3
+	4 5 4
+
+	t3_id7_idx (id7, keyspace_id:id6):
+	42 2
+	42 2
+	3 4
+	4 5
+	*/
+	exec(t, conn, "begin")
+	exec(t, conn, "update t3 set id7 = 42 where id6 = 2")
+	exec(t, conn, "commit")
+	qr = exec(t, conn, "select id5, id6, id7 from t3 order by id5")
+	if got, want := fmt.Sprintf("%v", qr.Rows), "[[INT64(2) INT64(2) INT64(42)] [INT64(3) INT64(4) INT64(3)] [INT64(4) INT64(5) INT64(4)] [INT64(42) INT64(2) INT64(42)]]"; got != want {
+		t.Errorf("select:\n%v want\n%v", got, want)
+	}
+
+	/* delete one specific keyspace id. after this dml, the tables will contain the following:
+	t3 (id5, id6, id7):
+	3 4 3
+	4 5 4
+
+	t3_id7_idx (id7, keyspace_id:id6):
+	3 4
+	4 5
+	*/
+	exec(t, conn, "delete from t3 where id6 = 2")
+	qr = exec(t, conn, "select * from t3 where id6 = 2")
+	require.Empty(t, qr.Rows)
+	qr = exec(t, conn, "select * from t3_id7_idx where id6 = 2")
+	require.Empty(t, qr.Rows)
+
+	// delete all the rows.
+	exec(t, conn, "delete from `ks[-]`.t3")
+	qr = exec(t, conn, "select * from t3")
+	require.Empty(t, qr.Rows)
+	qr = exec(t, conn, "select * from t3_id7_idx")
+	require.Empty(t, qr.Rows)
+}
+
+func TestDMLIn(t *testing.T) {
+	ctx := context.Background()
+	conn, err := mysql.Connect(ctx, &vtParams)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	/* Simple insert. after this dml, the tables will contain the following:
+	t3 (id5, id6, id7):
+	1 2 3
+	2 2 3
+	3 4 3
+	4 5 4
+
+	t3_id7_idx (id7, keyspace_id:id6):
+	3 2
+	3 2
+	3 4
+	4 5
+	*/
+	exec(t, conn, "begin")
+	exec(t, conn, "insert into t3(id5, id6, id7) values(1, 2, 3), (2, 2, 3), (3, 4, 3), (4, 5, 4)")
+	exec(t, conn, "commit")
+	qr := exec(t, conn, "select id5, id6, id7 from t3 order by id5, id6")
+	if got, want := fmt.Sprintf("%v", qr.Rows), "[[INT64(1) INT64(2) INT64(3)] [INT64(2) INT64(2) INT64(3)] [INT64(3) INT64(4) INT64(3)] [INT64(4) INT64(5) INT64(4)]]"; got != want {
+		t.Errorf("select:\n%v want\n%v", got, want)
+	}
+
+	/* Updating a non lookup column. after this dml, the tables will contain the following:
+	t3 (id5, id6, id7):
+	1 2 3
+	2 2 3
+	42 4 3
+	42 5 4
+
+	t3_id7_idx (id7, keyspace_id:id6):
+	3 2
+	3 2
+	3 4
+	4 5
+	*/
+	exec(t, conn, "update t3 set id5 = 42 where id6 in (4, 5)")
+	qr = exec(t, conn, "select id5, id6, id7 from t3 order by id5, id6")
+	if got, want := fmt.Sprintf("%v", qr.Rows), "[[INT64(1) INT64(2) INT64(3)] [INT64(2) INT64(2) INT64(3)] [INT64(42) INT64(4) INT64(3)] [INT64(42) INT64(5) INT64(4)]]"; got != want {
+		t.Errorf("select:\n%v want\n%v", got, want)
+	}
+
+	/* Updating a non lookup column. after this dml, the tables will contain the following:
+	t3 (id5, id6, id7):
+	1 2 42
+	2 2 42
+	42 4 3
+	42 5 4
+
+	t3_id7_idx (id7, keyspace_id:id6):
+	42 2
+	42 2
+	3 4
+	42 5
+	*/
+	exec(t, conn, "begin")
+	exec(t, conn, "update t3 set id7 = 42 where id6 in (2, 5)")
+	exec(t, conn, "commit")
+	qr = exec(t, conn, "select id5, id6, id7 from t3 order by id5, id6")
+	if got, want := fmt.Sprintf("%v", qr.Rows), "[[INT64(1) INT64(2) INT64(42)] [INT64(2) INT64(2) INT64(42)] [INT64(42) INT64(4) INT64(3)] [INT64(42) INT64(5) INT64(42)]]"; got != want {
+		t.Errorf("select:\n%v want\n%v", got, want)
+	}
+
+	/* Updating a non lookup column. after this dml, the tables will contain the following:
+	t3 (id5, id6, id7):
+	42 4 3
+	42 5 4
+
+	t3_id7_idx (id7, keyspace_id:id6):
+	3 4
+	42 5
+	*/
+	exec(t, conn, "delete from t3 where id6 in (2)")
+	qr = exec(t, conn, "select * from t3 where id6 = 2")
+	require.Empty(t, qr.Rows)
+	qr = exec(t, conn, "select * from t3_id7_idx where id6 = 2")
+	require.Empty(t, qr.Rows)
+
+	// delete all the rows.
+	exec(t, conn, "delete from t3 where id6 in (4, 5)")
+	qr = exec(t, conn, "select * from t3")
+	require.Empty(t, qr.Rows)
+	qr = exec(t, conn, "select * from t3_id7_idx")
+	require.Empty(t, qr.Rows)
 }
 
 func TestConsistentLookupMultiInsert(t *testing.T) {
@@ -230,14 +410,8 @@ func TestHashLookupMultiInsertIgnore(t *testing.T) {
 	defer conn2.Close()
 
 	// DB should start out clean
-	qr := exec(t, conn, "select count(*) from t2_id4_idx")
-	if got, want := fmt.Sprintf("%v", qr.Rows), "[[INT64(0)]]"; got != want {
-		t.Errorf("select:\n%v want\n%v", got, want)
-	}
-	qr = exec(t, conn, "select count(*) from t2")
-	if got, want := fmt.Sprintf("%v", qr.Rows), "[[INT64(0)]]"; got != want {
-		t.Errorf("select:\n%v want\n%v", got, want)
-	}
+	assertMatches(t, conn, "select count(*) from t2_id4_idx", "[[INT64(0)]]")
+	assertMatches(t, conn, "select count(*) from t2", "[[INT64(0)]]")
 
 	// Try inserting a bunch of ids at once
 	exec(t, conn, "begin")
@@ -245,14 +419,8 @@ func TestHashLookupMultiInsertIgnore(t *testing.T) {
 	exec(t, conn, "commit")
 
 	// Verify
-	qr = exec(t, conn, "select id3, id4 from t2 order by id3")
-	if got, want := fmt.Sprintf("%v", qr.Rows), "[[INT64(10) INT64(20)] [INT64(30) INT64(40)] [INT64(50) INT64(60)]]"; got != want {
-		t.Errorf("select:\n%v want\n%v", got, want)
-	}
-	qr = exec(t, conn, "select id3, id4 from t2_id4_idx order by id3")
-	if got, want := fmt.Sprintf("%v", qr.Rows), "[[INT64(10) INT64(20)] [INT64(30) INT64(40)] [INT64(50) INT64(60)]]"; got != want {
-		t.Errorf("select:\n%v want\n%v", got, want)
-	}
+	assertMatches(t, conn, "select id3, id4 from t2 order by id3", "[[INT64(10) INT64(20)] [INT64(30) INT64(40)] [INT64(50) INT64(60)]]")
+	assertMatches(t, conn, "select id3, id4 from t2_id4_idx order by id3", "[[INT64(10) INT64(20)] [INT64(30) INT64(40)] [INT64(50) INT64(60)]]")
 }
 
 func TestConsistentLookupUpdate(t *testing.T) {

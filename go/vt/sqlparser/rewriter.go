@@ -103,7 +103,7 @@ func replaceColumnTypeAutoincrement(newNode, parent SQLNode) {
 }
 
 func replaceColumnTypeComment(newNode, parent SQLNode) {
-	parent.(*ColumnType).Comment = newNode.(*SQLVal)
+	parent.(*ColumnType).Comment = newNode.(*Literal)
 }
 
 func replaceColumnTypeDefault(newNode, parent SQLNode) {
@@ -111,7 +111,7 @@ func replaceColumnTypeDefault(newNode, parent SQLNode) {
 }
 
 func replaceColumnTypeLength(newNode, parent SQLNode) {
-	parent.(*ColumnType).Length = newNode.(*SQLVal)
+	parent.(*ColumnType).Length = newNode.(*Literal)
 }
 
 func replaceColumnTypeNotNull(newNode, parent SQLNode) {
@@ -123,7 +123,7 @@ func replaceColumnTypeOnUpdate(newNode, parent SQLNode) {
 }
 
 func replaceColumnTypeScale(newNode, parent SQLNode) {
-	parent.(*ColumnType).Scale = newNode.(*SQLVal)
+	parent.(*ColumnType).Scale = newNode.(*Literal)
 }
 
 func replaceColumnTypeUnsigned(newNode, parent SQLNode) {
@@ -169,11 +169,11 @@ func replaceConvertExprType(newNode, parent SQLNode) {
 }
 
 func replaceConvertTypeLength(newNode, parent SQLNode) {
-	parent.(*ConvertType).Length = newNode.(*SQLVal)
+	parent.(*ConvertType).Length = newNode.(*Literal)
 }
 
 func replaceConvertTypeScale(newNode, parent SQLNode) {
-	parent.(*ConvertType).Scale = newNode.(*SQLVal)
+	parent.(*ConvertType).Scale = newNode.(*Literal)
 }
 
 func replaceConvertUsingExprExpr(newNode, parent SQLNode) {
@@ -654,7 +654,7 @@ func replaceSubstrExprName(newNode, parent SQLNode) {
 }
 
 func replaceSubstrExprStrVal(newNode, parent SQLNode) {
-	parent.(*SubstrExpr).StrVal = newNode.(*SQLVal)
+	parent.(*SubstrExpr).StrVal = newNode.(*Literal)
 }
 
 func replaceSubstrExprTo(newNode, parent SQLNode) {
@@ -805,6 +805,26 @@ func replaceUseDBName(newNode, parent SQLNode) {
 	parent.(*Use).DBName = newNode.(TableIdent)
 }
 
+func replaceVStreamComments(newNode, parent SQLNode) {
+	parent.(*VStream).Comments = newNode.(Comments)
+}
+
+func replaceVStreamLimit(newNode, parent SQLNode) {
+	parent.(*VStream).Limit = newNode.(*Limit)
+}
+
+func replaceVStreamSelectExpr(newNode, parent SQLNode) {
+	parent.(*VStream).SelectExpr = newNode.(SelectExpr)
+}
+
+func replaceVStreamTable(newNode, parent SQLNode) {
+	parent.(*VStream).Table = newNode.(TableName)
+}
+
+func replaceVStreamWhere(newNode, parent SQLNode) {
+	parent.(*VStream).Where = newNode.(*Where)
+}
+
 type replaceValTupleItems int
 
 func (r *replaceValTupleItems) replace(newNode, container SQLNode) {
@@ -909,6 +929,8 @@ func (a *application) apply(parent, node SQLNode, replacer replacerFunc) {
 	case *AndExpr:
 		a.apply(node, n.Left, replaceAndExprLeft)
 		a.apply(node, n.Right, replaceAndExprRight)
+
+	case Argument:
 
 	case *AutoIncSpec:
 		a.apply(node, n.Column, replaceAutoIncSpecColumn)
@@ -1103,6 +1125,8 @@ func (a *application) apply(parent, node SQLNode, replacer replacerFunc) {
 
 	case ListArg:
 
+	case *Literal:
+
 	case *MatchExpr:
 		a.apply(node, n.Columns, replaceMatchExprColumns)
 		a.apply(node, n.Expr, replaceMatchExprExpr)
@@ -1183,8 +1207,6 @@ func (a *application) apply(parent, node SQLNode, replacer replacerFunc) {
 		a.apply(node, n.Name, replaceReleaseName)
 
 	case *Rollback:
-
-	case *SQLVal:
 
 	case *SRollback:
 		a.apply(node, n.Name, replaceSRollbackName)
@@ -1345,6 +1367,13 @@ func (a *application) apply(parent, node SQLNode, replacer replacerFunc) {
 
 	case *Use:
 		a.apply(node, n.DBName, replaceUseDBName)
+
+	case *VStream:
+		a.apply(node, n.Comments, replaceVStreamComments)
+		a.apply(node, n.Limit, replaceVStreamLimit)
+		a.apply(node, n.SelectExpr, replaceVStreamSelectExpr)
+		a.apply(node, n.Table, replaceVStreamTable)
+		a.apply(node, n.Where, replaceVStreamWhere)
 
 	case ValTuple:
 		replacer := replaceValTupleItems(0)

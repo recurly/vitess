@@ -19,10 +19,15 @@ package vtgate
 import (
 	"flag"
 	"io"
+	"regexp"
 	"sync"
 	"time"
 
-	"github.com/gogo/protobuf/proto"
+	"vitess.io/vitess/go/vt/log"
+
+	"vitess.io/vitess/go/mysql"
+
+	"github.com/golang/protobuf/proto"
 
 	topodatapb "vitess.io/vitess/go/vt/proto/topodata"
 
@@ -163,6 +168,21 @@ func (stc *ScatterConn) ExecuteMultiShard(
 	var mu sync.Mutex
 	qr = new(sqltypes.Result)
 
+	if session.InLockSession() && session.TriggerLockHeartBeat() {
+		go func() {
+			_, lockErr := stc.ExecuteLock(ctx, &srvtopo.ResolvedShard{
+				Target:  session.LockSession.Target,
+				Gateway: stc.gateway,
+			}, &querypb.BoundQuery{
+				Sql:           "select 1",
+				BindVariables: nil,
+			}, session)
+			if lockErr != nil {
+				log.Warningf("Locking heartbeat failed, held locks might be released: %s", lockErr.Error())
+			}
+		}()
+	}
+
 	allErrors := stc.multiGoTransaction(
 		ctx,
 		"Execute",
@@ -175,6 +195,7 @@ func (stc *ScatterConn) ExecuteMultiShard(
 				err     error
 				opts    *querypb.ExecuteOptions
 				alias   *topodatapb.TabletAlias
+				qs      queryservice.QueryService
 			)
 			transactionID := info.transactionID
 			reservedID := info.reservedID
@@ -190,36 +211,30 @@ func (stc *ScatterConn) ExecuteMultiShard(
 				}
 			}
 
+			qs, err = getQueryService(rs, info)
+			if err != nil {
+				return nil, err
+			}
+
 			switch info.actionNeeded {
 			case nothing:
-				qs, err := getQueryService(rs, info)
-				if err != nil {
-					return nil, err
-				}
 				innerqr, err = qs.Execute(ctx, rs.Target, queries[i].Sql, queries[i].BindVariables, info.transactionID, info.reservedID, opts)
 				if err != nil {
+					checkAndResetShardSession(info, err, session)
 					return nil, err
 				}
 			case begin:
-				qs, err := getQueryService(rs, info)
-				if err != nil {
-					return nil, err
-				}
 				innerqr, transactionID, alias, err = qs.BeginExecute(ctx, rs.Target, session.Savepoints, queries[i].Sql, queries[i].BindVariables, info.reservedID, opts)
 				if err != nil {
 					return info.updateTransactionID(transactionID, alias), err
 				}
 			case reserve:
-				qs, err := getQueryService(rs, info)
-				if err != nil {
-					return nil, err
-				}
 				innerqr, reservedID, alias, err = qs.ReserveExecute(ctx, rs.Target, session.SetPreQueries(), queries[i].Sql, queries[i].BindVariables, info.transactionID, opts)
 				if err != nil {
 					return info.updateReservedID(reservedID, alias), err
 				}
 			case reserveBegin:
-				innerqr, transactionID, reservedID, alias, err = rs.Gateway.ReserveBeginExecute(ctx, rs.Target, session.SetPreQueries(), queries[i].Sql, queries[i].BindVariables, opts)
+				innerqr, transactionID, reservedID, alias, err = qs.ReserveBeginExecute(ctx, rs.Target, session.SetPreQueries(), queries[i].Sql, queries[i].BindVariables, opts)
 				if err != nil {
 					return info.updateTransactionAndReservedID(transactionID, reservedID, alias), err
 				}
@@ -242,6 +257,14 @@ func (stc *ScatterConn) ExecuteMultiShard(
 	}
 
 	return qr, allErrors.GetErrors()
+}
+
+var errRegx = regexp.MustCompile("transaction ([a-z0-9:]+) ended")
+
+func checkAndResetShardSession(info *shardActionInfo, err error, session *SafeSession) {
+	if info.reservedID != 0 && info.transactionID == 0 && !isConnectionAlive(err) {
+		session.ResetShard(info.alias)
+	}
 }
 
 func getQueryService(rs *srvtopo.ResolvedShard, info *shardActionInfo) (queryservice.QueryService, error) {
@@ -603,6 +626,11 @@ func (stc *ScatterConn) ExecuteLock(
 			return nil, vterrors.Errorf(vtrpcpb.Code_INTERNAL, "BUG: reservedID zero not expected %v", reservedID)
 		}
 		qr, err = qs.Execute(ctx, rs.Target, query.Sql, query.BindVariables, 0 /* transactionID */, reservedID, opts)
+		if err != nil && !isConnectionAlive(err) {
+			session.ResetLock()
+			err = vterrors.Wrap(err, "held locks released")
+		}
+		session.UpdateLockHeartbeat()
 	case reserve:
 		qr, reservedID, alias, err = qs.ReserveExecute(ctx, rs.Target, session.SetPreQueries(), query.Sql, query.BindVariables, 0 /* transactionID */, opts)
 		if err != nil && reservedID != 0 {
@@ -624,6 +652,14 @@ func (stc *ScatterConn) ExecuteLock(
 		return nil, err
 	}
 	return qr, err
+}
+
+func isConnectionAlive(err error) bool {
+	sqlErr := mysql.NewSQLErrorFromError(err).(*mysql.SQLError)
+	if sqlErr.Number() == mysql.CRServerGone || sqlErr.Number() == mysql.CRServerLost || (sqlErr.Number() == mysql.ERQueryInterrupted && errRegx.Match([]byte(sqlErr.Error()))) {
+		return false
+	}
+	return true
 }
 
 // actionInfo looks at the current session, and returns information about what needs to be done for this tablet

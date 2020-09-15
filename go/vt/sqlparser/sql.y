@@ -75,7 +75,7 @@ func skipToEnd(yylex interface{}) {
   expr          Expr
   exprs         Exprs
   boolVal       BoolVal
-  sqlVal        *SQLVal
+  literal        *Literal
   colTuple      ColTuple
   values        Values
   valTuple      ValTuple
@@ -121,7 +121,7 @@ func skipToEnd(yylex interface{}) {
 
 %token LEX_ERROR
 %left <bytes> UNION
-%token <bytes> SELECT STREAM INSERT UPDATE DELETE FROM WHERE GROUP HAVING ORDER BY LIMIT OFFSET FOR
+%token <bytes> SELECT STREAM VSTREAM INSERT UPDATE DELETE FROM WHERE GROUP HAVING ORDER BY LIMIT OFFSET FOR
 %token <bytes> ALL DISTINCT AS EXISTS ASC DESC INTO DUPLICATE KEY DEFAULT SET LOCK UNLOCK KEYS DO
 %token <bytes> DISTINCTROW
 %token <bytes> VALUES LAST_INSERT_ID
@@ -220,7 +220,7 @@ func skipToEnd(yylex interface{}) {
 %type <statement> command
 %type <selStmt> simple_select select_statement base_select union_rhs
 %type <statement> explain_statement explainable_statement
-%type <statement> stream_statement insert_statement update_statement delete_statement set_statement set_transaction_statement
+%type <statement> stream_statement vstream_statement insert_statement update_statement delete_statement set_statement set_transaction_statement
 %type <statement> create_statement alter_statement rename_statement drop_statement truncate_statement flush_statement do_statement
 %type <ddl> create_table_prefix rename_list
 %type <statement> analyze_statement show_statement use_statement other_statement
@@ -296,7 +296,7 @@ func skipToEnd(yylex interface{}) {
 %type <convertType> convert_type
 %type <columnType> column_type
 %type <columnType> int_type decimal_type numeric_type time_type char_type spatial_type
-%type <sqlVal> length_opt column_comment_opt
+%type <literal> length_opt column_comment_opt
 %type <optVal> column_default_opt on_update_opt
 %type <str> charset_opt collate_opt
 %type <boolVal> unsigned_opt zero_fill_opt
@@ -348,6 +348,7 @@ command:
     $$ = $1
   }
 | stream_statement
+| vstream_statement
 | insert_statement
 | update_statement
 | delete_statement
@@ -452,6 +453,12 @@ stream_statement:
   STREAM comment_opt select_expression FROM table_name
   {
     $$ = &Stream{Comments: Comments($2), SelectExpr: $3, Table: $5}
+  }
+
+vstream_statement:
+  VSTREAM comment_opt select_expression FROM table_name where_expression_opt limit_opt
+  {
+    $$ = &VStream{Comments: Comments($2), SelectExpr: $3, Table: $5, Where: NewWhere(WhereStr, $6), Limit: $7}
   }
 
 // base_select is an unparenthesized SELECT with no order by clause or beyond.
@@ -990,7 +997,7 @@ length_opt:
   }
 | '(' INTEGRAL ')'
   {
-    $$ = NewIntVal($2)
+    $$ = NewIntLiteral($2)
   }
 
 float_length_opt:
@@ -1000,8 +1007,8 @@ float_length_opt:
 | '(' INTEGRAL ',' INTEGRAL ')'
   {
     $$ = LengthScaleOption{
-        Length: NewIntVal($2),
-        Scale: NewIntVal($4),
+        Length: NewIntLiteral($2),
+        Scale: NewIntLiteral($4),
     }
   }
 
@@ -1012,14 +1019,14 @@ decimal_length_opt:
 | '(' INTEGRAL ')'
   {
     $$ = LengthScaleOption{
-        Length: NewIntVal($2),
+        Length: NewIntLiteral($2),
     }
   }
 | '(' INTEGRAL ',' INTEGRAL ')'
   {
     $$ = LengthScaleOption{
-        Length: NewIntVal($2),
-        Scale: NewIntVal($4),
+        Length: NewIntLiteral($2),
+        Scale: NewIntLiteral($4),
     }
   }
 
@@ -1135,7 +1142,7 @@ column_comment_opt:
   }
 | COMMENT_KEYWORD STRING
   {
-    $$ = NewStrVal($2)
+    $$ = NewStrLiteral($2)
   }
 
 index_definition:
@@ -1166,11 +1173,11 @@ index_option:
 | KEY_BLOCK_SIZE equal_opt INTEGRAL
   {
     // should not be string
-    $$ = &IndexOption{Name: string($1), Value: NewIntVal($3)}
+    $$ = &IndexOption{Name: string($1), Value: NewIntLiteral($3)}
   }
 | COMMENT_KEYWORD STRING
   {
-    $$ = &IndexOption{Name: string($1), Value: NewStrVal($2)}
+    $$ = &IndexOption{Name: string($1), Value: NewStrLiteral($2)}
   }
 
 equal_opt:
@@ -2678,7 +2685,7 @@ value_expression:
   }
 | '+'  value_expression %prec UNARY
   {
-    if num, ok := $2.(*SQLVal); ok && num.Type == IntVal {
+    if num, ok := $2.(*Literal); ok && num.Type == IntVal {
       $$ = num
     } else {
       $$ = &UnaryExpr{Operator: UPlusStr, Expr: $2}
@@ -2686,13 +2693,13 @@ value_expression:
   }
 | '-'  value_expression %prec UNARY
   {
-    if num, ok := $2.(*SQLVal); ok && num.Type == IntVal {
+    if num, ok := $2.(*Literal); ok && num.Type == IntVal {
       // Handle double negative
       if num.Val[0] == '-' {
         num.Val = num.Val[1:]
         $$ = num
       } else {
-        $$ = NewIntVal(append([]byte("-"), num.Val...))
+        $$ = NewIntLiteral(append([]byte("-"), num.Val...))
       }
     } else {
       $$ = &UnaryExpr{Operator: UMinusStr, Expr: $2}
@@ -2776,11 +2783,11 @@ function_call_keyword:
   }
 | SUBSTR openb STRING FROM value_expression FOR value_expression closeb
   {
-    $$ = &SubstrExpr{StrVal: NewStrVal($3), From: $5, To: $7}
+    $$ = &SubstrExpr{StrVal: NewStrLiteral($3), From: $5, To: $7}
   }
 | SUBSTRING openb STRING FROM value_expression FOR value_expression closeb
   {
-    $$ = &SubstrExpr{StrVal: NewStrVal($3), From: $5, To: $7}
+    $$ = &SubstrExpr{StrVal: NewStrLiteral($3), From: $5, To: $7}
   }
 | MATCH openb select_expression_list closeb AGAINST openb value_expression match_option closeb
   {
@@ -3071,31 +3078,31 @@ column_name:
 value:
   STRING
   {
-    $$ = NewStrVal($1)
+    $$ = NewStrLiteral($1)
   }
 | HEX
   {
-    $$ = NewHexVal($1)
+    $$ = NewHexLiteral($1)
   }
 | BIT_LITERAL
   {
-    $$ = NewBitVal($1)
+    $$ = NewBitLiteral($1)
   }
 | INTEGRAL
   {
-    $$ = NewIntVal($1)
+    $$ = NewIntLiteral($1)
   }
 | FLOAT
   {
-    $$ = NewFloatVal($1)
+    $$ = NewFloatLiteral($1)
   }
 | HEXNUM
   {
-    $$ = NewHexNum($1)
+    $$ = NewHexNumLiteral($1)
   }
 | VALUE_ARG
   {
-    $$ = NewValArg($1)
+    $$ = NewArgument($1)
   }
 | NULL
   {
@@ -3110,15 +3117,15 @@ num_val:
       yylex.Error("expecting value after next")
       return 1
     }
-    $$ = NewIntVal([]byte("1"))
+    $$ = NewIntLiteral([]byte("1"))
   }
 | INTEGRAL VALUES
   {
-    $$ = NewIntVal($1)
+    $$ = NewIntLiteral($1)
   }
 | VALUE_ARG VALUES
   {
-    $$ = NewValArg($1)
+    $$ = NewArgument($1)
   }
 
 group_by_opt:
@@ -3324,11 +3331,11 @@ set_list:
 set_expression:
   reserved_sql_id '=' ON
   {
-    $$ = &SetExpr{Name: $1, Expr: NewStrVal([]byte("on"))}
+    $$ = &SetExpr{Name: $1, Expr: NewStrLiteral([]byte("on"))}
   }
 | reserved_sql_id '=' OFF
   {
-    $$ = &SetExpr{Name: $1, Expr: NewStrVal([]byte("off"))}
+    $$ = &SetExpr{Name: $1, Expr: NewStrLiteral([]byte("off"))}
   }
 | reserved_sql_id '=' expression
   {
@@ -3355,11 +3362,11 @@ charset_or_character_set:
 charset_value:
   sql_id
   {
-    $$ = NewStrVal([]byte($1.String()))
+    $$ = NewStrLiteral([]byte($1.String()))
   }
 | STRING
   {
-    $$ = NewStrVal($1)
+    $$ = NewStrLiteral($1)
   }
 | DEFAULT
   {

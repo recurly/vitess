@@ -31,7 +31,7 @@ import (
 	"vitess.io/vitess/go/vt/log"
 	"vitess.io/vitess/go/vt/sqlparser"
 
-	"github.com/gogo/protobuf/proto"
+	"github.com/golang/protobuf/proto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"vitess.io/vitess/go/mysql"
@@ -1513,7 +1513,7 @@ func TestNoFutureGTID(t *testing.T) {
 	}()
 	defer close(ch)
 	err = vstream(ctx, t, future, nil, nil, ch)
-	want := "is ahead of current position"
+	want := "GTIDSet Mismatch"
 	if err == nil || !strings.Contains(err.Error(), want) {
 		t.Errorf("err: %v, must contain %s", err, want)
 	}
