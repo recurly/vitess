@@ -36,6 +36,7 @@ import (
 
 	"vitess.io/vitess/go/sqltypes"
 	"vitess.io/vitess/go/vt/key"
+	"vitess.io/vitess/go/vt/schema"
 	"vitess.io/vitess/go/vt/srvtopo"
 
 	querypb "vitess.io/vitess/go/vt/proto/query"
@@ -100,15 +101,15 @@ func (t noopVCursor) SetAutocommit(bool) error {
 	panic("implement me")
 }
 
-func (t noopVCursor) SetClientFoundRows(bool) {
+func (t noopVCursor) SetClientFoundRows(bool) error {
 	panic("implement me")
 }
 
-func (t noopVCursor) SetSkipQueryPlanCache(bool) {
+func (t noopVCursor) SetSkipQueryPlanCache(bool) error {
 	panic("implement me")
 }
 
-func (t noopVCursor) SetSQLSelectLimit(int64) {
+func (t noopVCursor) SetSQLSelectLimit(int64) error {
 	panic("implement me")
 }
 
@@ -176,6 +177,10 @@ func (t noopVCursor) ExecuteKeyspaceID(keyspace string, ksid []byte, query strin
 }
 
 func (t noopVCursor) ResolveDestinations(keyspace string, ids []*querypb.Value, destinations []key.Destination) ([]*srvtopo.ResolvedShard, [][]*querypb.Value, error) {
+	panic("unimplemented")
+}
+
+func (t noopVCursor) SubmitOnlineDDL(onlineDDl *schema.OnlineDDL) error {
 	panic("unimplemented")
 }
 
@@ -294,6 +299,11 @@ func (f *loggingVCursor) AutocommitApproval() bool {
 	return true
 }
 
+func (f *loggingVCursor) SubmitOnlineDDL(onlineDDL *schema.OnlineDDL) error {
+	f.log = append(f.log, fmt.Sprintf("SubmitOnlineDDL: %s", onlineDDL.ToString()))
+	return nil
+}
+
 func (f *loggingVCursor) ExecuteStandalone(query string, bindvars map[string]*querypb.BindVariable, rs *srvtopo.ResolvedShard) (*sqltypes.Result, error) {
 	f.log = append(f.log, fmt.Sprintf("ExecuteStandalone %s %v %s %s", query, printBindVars(bindvars), rs.Target.Keyspace, rs.Target.Shard))
 	return f.nextResult()
@@ -405,15 +415,15 @@ func (f *loggingVCursor) SetAutocommit(bool) error {
 	panic("implement me")
 }
 
-func (f *loggingVCursor) SetClientFoundRows(bool) {
+func (f *loggingVCursor) SetClientFoundRows(bool) error {
 	panic("implement me")
 }
 
-func (f *loggingVCursor) SetSkipQueryPlanCache(bool) {
+func (f *loggingVCursor) SetSkipQueryPlanCache(bool) error {
 	panic("implement me")
 }
 
-func (f *loggingVCursor) SetSQLSelectLimit(int64) {
+func (f *loggingVCursor) SetSQLSelectLimit(int64) error {
 	panic("implement me")
 }
 
