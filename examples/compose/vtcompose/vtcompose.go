@@ -311,7 +311,7 @@ func getTableName(sqlFile string) string {
 		log.Fatalf("reading sqlFile file %s: %s", sqlFile, err)
 	}
 
-	r, _ := regexp.Compile("CREATE TABLE ([a-z_-]*) \\(")
+	r, _ := regexp.Compile("CREATE TABLE ([`A-z_0-9]*) \\(")
 	rs := r.FindStringSubmatch(string(sqlFileData))
 	// replace all ` from table name if exists
 	return strings.ReplaceAll(rs[1], "`", "")
@@ -326,7 +326,8 @@ func getPrimaryKey(sqlFile string) string {
 	r, _ := regexp.Compile("PRIMARY KEY \\((.*)\\).*")
 	rs := r.FindStringSubmatch(string(sqlFileData))
 
-	return rs[1]
+	// replace all ` from key fields if exists
+	return strings.ReplaceAll(rs[1], "`", "")
 }
 
 func getKeyColumns(sqlFile string) string {
